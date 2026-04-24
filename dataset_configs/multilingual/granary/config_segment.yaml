@@ -1,0 +1,219 @@
+input_manifest_file: ?? 
+output_dir: ??
+sdp_dir: ?? #/path/to/NeMo-speech-data-processor
+cache_dir: ${output_dir}/cache
+
+params:
+  source_lang: en
+  source_lang_full: English
+  min_audio_lid_probability:  0.7
+  min_audio_duration: 0.1
+  max_audio_duration: 40.0
+  use_regex: common
+  min_file_audio_duration: 600.0
+  max_file_audio_duration: 3600.0
+
+processors_to_run: "all"
+use_dask: False
+
+processors:
+  - _target_: sdp.processors.FfmpegConvert
+    input_manifest_file: ${input_manifest_file}
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_00.json
+    input_file_key: 'source_audio_filepath'
+    output_file_key: 'audio_filepath'
+    converted_audio_dir: ${output_dir}/${params.source_lang}/converted_audio/
+    target_samplerate: 16000
+    target_nchannels: 1
+  
+  - _target_: sdp.processors.GetAudioDuration
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_01.json
+    audio_filepath_key: 'audio_filepath'
+    duration_key: 'duration'
+
+  - _target_: sdp.processors.FasterWhisperInference
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_02.json
+    model_size_or_path: 'large-v3'
+    num_devices: -1
+    output_dir: ${output_dir}/${params.source_lang}/step_02
+    language_detection_only: True
+    inference:
+        language_detection_segments: 7
+        chunk_length: 30
+    save_timestamps_separately: False
+    skip_corrupted_audios: True
+
+  - _target_: sdp.processors.DropHighLowDuration
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_03.json
+    high_duration_threshold: ${params.max_file_audio_duration}
+    low_duration_threshold: ${params.min_file_audio_duration}
+  
+  - _target_: sdp.processors.LambdaExpression
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_04.json
+    new_field: 'lid_verified'
+    expression: (entry.language == "${params.source_lang}") & (entry.language_probability >= ${params.min_audio_lid_probability})
+    filter: True
+
+  - _target_: sdp.processors.DropSpecifiedFields
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_05.json
+    fields_to_drop:
+      - source_audio_filepath
+      - language
+      - language_probability
+      - lid_verified
+  
+  - _target_: sdp.processors.FasterWhisperInference
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_06.json
+    model_size_or_path: 'large-v3'
+    output_dir: ${output_dir}/${params.source_lang}/step_06
+    num_devices: -1
+    inference:
+        language: ${params.source_lang}
+    save_timestamps_separately: False
+    skip_corrupted_audios: True
+  
+  - _target_: sdp.processors.DropSpecifiedFields
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_07.json
+    fields_to_drop:
+      - duration
+  
+  - _target_: sdp.processors.ListToEntries
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_08.json
+    field_with_list: 'segments'
+  
+  - _target_: sdp.processors.KeepOnlySpecifiedFields
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_09.json
+    fields_to_keep:
+      - audio_filepath
+      - id
+      - start
+      - end
+      - text
+      - language
+  
+  - _target_: sdp.processors.LambdaExpression
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_10.json
+    new_field: 'duration'
+    expression: entry.end - entry.start
+  
+  - _target_: sdp.processors.DropHighLowDuration
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_11.json
+    high_duration_threshold: ${params.max_audio_duration}
+    low_duration_threshold: ${params.min_audio_duration}
+  
+  - _target_: sdp.processors.RenameFields
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_12.json
+    rename_fields: 
+      start: offset 
+      id: segment_id 
+      language: source_lang
+  
+  - _target_: sdp.processors.KeepOnlySpecifiedFields
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_13.json
+    fields_to_keep: 
+      - source_lang
+      - audio_filepath
+      - segment_id
+      - offset
+      - duration
+
+  - _target_: sdp.processors.FasterWhisperInference
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_14.json
+    model_size_or_path: 'large-v3'
+    num_devices: -1
+    output_dir: ${output_dir}/${params.source_lang}/step_14
+    inference:
+        language: ${params.source_lang}
+    save_timestamps_separately: False
+    skip_corrupted_audios: True
+    slice_by_offset: True
+  
+  - _target_: sdp.processors.KeepOnlySpecifiedFields
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_15.json
+    fields_to_keep: 
+      - source_lang
+      - audio_filepath
+      - segment_id
+      - offset
+      - duration
+      - pred_text
+  
+  - _target_: sdp.processors.RenameFields
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_16.json
+    rename_fields:
+      pred_text: text
+
+  - _target_: sdp.processors.DropIfRegexMatch
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_17.json
+    text_key: text
+    regex_patterns:
+      - "^\\s*$"
+
+  - _target_: sdp.processors.DetectWhisperHallucinationFeatures
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_18.json
+    common_hall_file: ${sdp_dir}/dataset_configs/multilingual/granary/partials/common_phrases/${params.source_lang}.txt
+    text_field: text
+  
+  - _target_: sdp.processors.LambdaExpression
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_19.json
+    new_field:  is_hallucinated
+    expression: (not entry.hall_repeated_ngrams) & (not entry.hall_long_word) & (not entry.hall_frequent_single_word)
+    filter: True
+    
+  - _target_: sdp.processors.KeepOnlySpecifiedFields
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_20.json
+    fields_to_keep: 
+      - source_lang
+      - audio_filepath
+      - segment_id
+      - offset
+      - duration
+      - text
+      
+  - _target_: sdp.processors.vLLMInference
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_21.json
+    generation_field: src_text
+    prompt_file: ${sdp_dir}/dataset_configs/multilingual/granary/partials/pr_recovery_prompts/${params.source_lang}.yaml
+    model:
+      model: "Qwen/Qwen2.5-7B-Instruct-1M"
+      tensor_parallel_size: 2
+      max_model_len: 2048
+      enable_chunked_prefill: True
+      max_num_batched_tokens: 1024
+      enforce_eager: True
+      dtype: float16
+      gpu_memory_utilization: 0.95 
+      max_num_seqs: 16
+    inference:
+      temperature: 0.7
+      top_p: 0.8
+      repetition_penalty: 1.05
+      max_tokens: 2048
+    apply_chat_template:
+      tokenize: False
+      add_generation_prompt: True
+  
+  - _target_: sdp.processors.CleanQwenGeneration
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_22.json
+    text_field: text
+    generation_field: src_text
+  
+  - _target_: sdp.processors.SubRegex
+    text_key: src_text
+    regex_params_yaml: ${sdp_dir}/dataset_configs/multilingual/granary/partials/subregex_params/${params.use_regex}.yaml
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_23.json
+  
+  - _target_: sdp.processors.DropSpecifiedFields
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_24.json
+    fields_to_drop:
+      - text
+  
+  - _target_: sdp.processors.AddConstantFields
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_25.json
+    fields:
+      target_lang: ${params.translation.target_lang}
+
+  - _target_: sdp.processors.RenameFields
+    output_manifest_file: ${output_dir}/${params.source_lang}/manifest_26.json
+    rename_fields:
+      src_text: text
